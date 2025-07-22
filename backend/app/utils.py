@@ -1,9 +1,12 @@
 import pandas as pd
 import numpy as np
 import re
+import spacy
 from typing import List, Dict, Tuple, Optional, Any
 from scipy.ndimage import label
 import logging
+
+nlp = spacy.load("en_core_web_sm")
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -250,42 +253,22 @@ def find_header_rows_in_section(df: pd.DataFrame) -> List[int]:
     return [idx for idx, score in header_candidates[:3]]
 
 def calculate_header_score_advanced(values: List[str], row_idx: int, total_rows: int) -> float:
-    """
-    Score potential header row based on content characteristics.
-    """
-    if not values:
-        return 0.0
-
     score = 0.0
     total = len(values)
     cleaned = [v for v in values if v and v.strip()]
-
     if not cleaned:
         return 0.0
-
-    # Factor 1: Text vs numeric ratio (headers are typically text)
+    # Existing heuristics
     text_count = sum(1 for v in cleaned if not is_numeric_string(v))
-    text_ratio = text_count / total
-    score += text_ratio * 0.3
-
-    # Factor 2: Length distribution (headers have moderate length)
-    good_length_count = sum(1 for v in cleaned if 2 <= len(v) <= 50)
-    length_ratio = good_length_count / total
-    score += length_ratio * 0.2
-
-    # Factor 3: Uniqueness (headers should be distinct)
-    unique_ratio = len(set(cleaned)) / total
-    score += unique_ratio * 0.25
-
-    # Factor 4: Position (headers are often near the top)
-    position_bonus = max(0, (10 - row_idx) / 10) * 0.15
-    score += position_bonus
-
-    # Factor 5: Alphanumeric content (headers often have letters)
-    alpha_count = sum(1 for v in cleaned if re.search(r'[a-zA-Z]', v))
-    alpha_ratio = alpha_count / total
-    score += alpha_ratio * 0.1
-
+    score += (text_count / total) * 0.3
+    # NLP-based scoring
+    nlp_score = sum(1 for val in cleaned if any(token.pos_ in ["NOUN", "PROPN"] for token in nlp(val)))
+    score += (nlp_score / total) * 0.2
+    # Position-based scoring
+    score += (1 - row_idx / total_rows) * 0.2
+    # Length-based scoring
+    avg_len = sum(len(str(v)) for v in cleaned) / total
+    score += min(avg_len / 10, 0.3)
     return max(0, min(score, 1.0))
 
 def is_numeric_string(s: str) -> bool:

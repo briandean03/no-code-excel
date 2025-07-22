@@ -187,8 +187,8 @@ const FileUploader = () => {
                     {result.tables.map((t, idx) => (
                       <option key={idx} value={idx}>
                         {t.sheet_name
-                          ? `${t.sheet_name} - Table ${t.table_id || idx + 1} ${t.is_tabular ? "(Tabular)" : "(Non-Tabular)"}`
-                          : `Table ${idx + 1} ${t.is_tabular ? "(Tabular)" : "(Non-Tabular)"}`}
+                          ? `${t.sheet_name} - Table ${t.table_id || idx + 1} (Confidence: ${(t.confidence_score * 100).toFixed(0)}%)`
+                          : `Table ${idx + 1} (Confidence: ${(t.confidence_score * 100).toFixed(0)}%)`}
                       </option>
                     ))}
                   </select>
