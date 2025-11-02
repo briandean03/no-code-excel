@@ -1,28 +1,34 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from io import BytesIO
 import pandas as pd
 import numpy as np
 import logging
 from typing import Dict, List, Any, Optional
-from app.utils import detect_and_clean_tables, get_table_info
 
-# Set up logging
+from app.config import settings
+from app.schemas import UploadResponse, TableSectionMeta, TableStats, FileInfo
+from app.processors.table_processor import TableProcessor
+
+# ---- Logging ----
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Excel/CSV Sheet Processor", version="1.0.0")
+app = FastAPI(title=settings.APP_NAME, version=settings.VERSION)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+processor = TableProcessor(logger=logger)
+
+# ---- Helpers identical to your original (kept as-is) ----
 def convert_numpy_types(obj):
     if isinstance(obj, np.integer):
         return int(obj)
@@ -88,7 +94,6 @@ def analyze_sheet_structure(df: pd.DataFrame, sheet_name: str) -> Dict[str, Any]
         if empty_rows > 3:
             analysis["recommendations"].append("Multiple tables or sections may be present")
 
-    # Check for non-tabular patterns (e.g., long text blocks)
     text_columns = df.select_dtypes(include=['object']).columns
     for col in text_columns[:5]:
         non_null = df[col].dropna()
@@ -96,213 +101,139 @@ def analyze_sheet_structure(df: pd.DataFrame, sheet_name: str) -> Dict[str, Any]
             analysis["potential_issues"].append(f"Column {col} contains long text, possibly notes")
             analysis["is_likely_tabular"] = False
             analysis["recommendations"].append("Consider extracting key-value pairs from text")
-
     return analysis
 
-@app.post("/upload/")
+# ---- Routes ----
+
+@app.post("/upload/", response_model=UploadResponse)
 async def upload_excel(file: UploadFile = File(...)):
     try:
         logger.info(f"Processing file: {file.filename}")
         contents = await file.read()
-
-        file_extension = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
+        ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
         all_sheets = {}
 
-        if file_extension in ['xlsx', 'xls']:
+        if ext in ['xlsx', 'xls']:
             try:
-                logger.info("Reading as Excel file...")
-                all_sheets = pd.read_excel(
-                    BytesIO(contents),
-                    sheet_name=None,
-                    header=None,
-                    keep_default_na=False,
-                    na_values=['']
-                )
-                logger.info(f"Successfully loaded {len(all_sheets)} Excel sheets: {list(all_sheets.keys())}")
+                all_sheets = pd.read_excel(BytesIO(contents), sheet_name=None, header=None,
+                                           keep_default_na=False, na_values=[''])
             except Exception as e:
-                logger.error(f"Excel read failed: {e}")
                 raise HTTPException(status_code=400, detail=f"Could not read Excel file: {str(e)}")
-
-        elif file_extension == 'csv':
+        elif ext == 'csv':
             try:
-                logger.info("Reading as CSV file...")
                 csv_df = pd.read_csv(BytesIO(contents), header=None, keep_default_na=False, na_values=[''])
                 all_sheets = {'CSV': csv_df}
-                logger.info("Successfully loaded CSV file")
             except Exception as e:
-                logger.error(f"CSV read failed: {e}")
                 raise HTTPException(status_code=400, detail=f"Could not read CSV file: {str(e)}")
         else:
+            # best-effort fallback
             try:
-                logger.info("Trying to read as Excel...")
                 all_sheets = pd.read_excel(BytesIO(contents), sheet_name=None, header=None)
-                logger.info(f"Successfully loaded as Excel: {list(all_sheets.keys())}")
             except Exception as e1:
-                logger.info(f"Excel read failed: {e1}, trying CSV...")
                 try:
                     csv_df = pd.read_csv(BytesIO(contents), header=None)
                     all_sheets = {'CSV': csv_df}
-                    logger.info("Successfully loaded as CSV")
                 except Exception as e2:
-                    logger.error(f"Both Excel and CSV reads failed: {e1}, {e2}")
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Could not read file as Excel or CSV: {str(e1)}"
-                    )
+                    raise HTTPException(status_code=400, detail=f"Could not read file as Excel or CSV: {str(e1)}")
 
         if not all_sheets:
             raise HTTPException(status_code=400, detail="No sheets found in the uploaded file")
 
-        processed_sheets = []
+        processed_tables: List[TableSectionMeta] = []
         total_tables_found = 0
         non_tabular_sections = 0
 
         for sheet_name, df in all_sheets.items():
-            logger.info(f"Processing sheet: {sheet_name} (shape: {df.shape})")
-
-            # Clean sheet first
             df_cleaned = df.dropna(how='all').dropna(axis=1, how='all')
-            if df_cleaned.empty:
-                logger.info(f"Skipping empty or garbage sheet: {sheet_name}")
-                processed_sheets.append({
-                    "sheet_name": sheet_name,
-                    "table_id": 0,
-                    "table_name": f"{sheet_name} - Empty",
-                    "rows": 0,
-                    "columns": 0,
-                    "column_names": [],
-                    "preview": [],
-                    "stats": {},
-                    "sheet_analysis": analyze_sheet_structure(df_cleaned, sheet_name),
-                    "start_row": None,
-                    "end_row": None,
-                    "start_col": None,
-                    "end_col": None,
-                    "confidence_score": 0.0,
-                    "is_tabular": False
-                })
-                continue
-
             sheet_analysis = analyze_sheet_structure(df_cleaned, sheet_name)
+
             if not sheet_analysis["has_data"]:
-                processed_sheets.append({
-                    "sheet_name": sheet_name,
-                    "table_id": 0,
-                    "table_name": f"{sheet_name} - No Data",
-                    "rows": 0,
-                    "columns": 0,
-                    "column_names": [],
-                    "preview": [],
-                    "stats": {},
-                    "sheet_analysis": sheet_analysis,
-                    "start_row": None,
-                    "end_row": None,
-                    "start_col": None,
-                    "end_col": None,
-                    "confidence_score": 0.0,
-                    "is_tabular": False
-                })
                 continue
 
-            tables = detect_and_clean_tables(df_cleaned)
-            logger.info(f"Found {len(tables)} tables in sheet {sheet_name}")
+            detected = processor.detect_tables(
+                df_cleaned,
+                min_data_density=settings.MIN_DATA_DENSITY,
+                min_cols=settings.MIN_COLS,
+                min_rows=settings.MIN_ROWS,
+                max_gap=settings.MAX_GAP
+            )
 
-            for i, table_dict in enumerate(tables):
+            for i, table_dict in enumerate(detected):
                 table = table_dict["table"]
                 if table.empty:
                     continue
-                try:
-                    table_info = get_table_info(table)
-                    preview_data = safe_json_convert(table, max_rows=10)
-                    data_types = {col: str(dtype) for col, dtype in table.dtypes.items()}
-                    missing_data = convert_numpy_types(table.isnull().sum().to_dict())
-                    non_null_counts = convert_numpy_types(table.notna().sum().to_dict())
 
-                    processed_table = {
-                        "sheet_name": sheet_name,
-                        "table_id": i + 1,
-                        "table_name": f"{sheet_name} - Table {i + 1}",
-                        "rows": int(len(table)),
-                        "columns": int(len(table.columns)),
-                        "column_names": table.columns.tolist(),
-                        "preview": preview_data,
-                        "stats": {
-                            "data_types": data_types,
-                            "missing_data": missing_data,
-                            "non_null_counts": non_null_counts,
-                            "data_quality": convert_numpy_types(table_info.get("data_quality", {})),
-                            "memory_usage": convert_numpy_types(table_info.get("memory_usage", 0))
-                        },
-                        "sheet_analysis": sheet_analysis,
-                        "start_row": table_dict.get("start_row"),
-                        "end_row": table_dict.get("end_row"),
-                        "start_col": table_dict.get("start_col"),
-                        "end_col": table_dict.get("end_col"),
-                        "confidence_score": table_dict.get("confidence_score"),
-                        "is_tabular": table_dict.get("is_tabular"),
-                        "header_row": table_dict.get("header_row")
-                    }
+                tinfo = processor.get_table_info(table)
+                preview = safe_json_convert(table, max_rows=10)
 
-                    processed_sheets.append(processed_table)
-                    total_tables_found += 1
-                    if not table_dict.get("is_tabular"):
-                        non_tabular_sections += 1
+                stats = TableStats(
+                    data_types={col: str(dtype) for col, dtype in table.dtypes.items()},
+                    missing_data={k: int(v) for k, v in table.isnull().sum().to_dict().items()},
+                    non_null_counts={k: int(v) for k, v in table.notna().sum().to_dict().items()},
+                    data_quality=tinfo.get("data_quality"),
+                    memory_usage=float(tinfo.get("memory_usage", 0))
+                )
 
-                except Exception as e:
-                    logger.error(f"Error processing table {i+1} in sheet {sheet_name}: {e}")
-                    continue
+                processed_tables.append(
+                    TableSectionMeta(
+                        sheet_name=sheet_name,
+                        table_id=i + 1,
+                        table_name=f"{sheet_name} - Table {i + 1}",
+                        rows=int(len(table)),
+                        columns=int(len(table.columns)),
+                        column_names=list(table.columns),
+                        preview=preview,
+                        stats=stats,
+                        start_row=table_dict.get("start_row"),
+                        end_row=table_dict.get("end_row"),
+                        start_col=table_dict.get("start_col"),
+                        end_col=table_dict.get("end_col"),
+                        header_row=table_dict.get("header_row"),
+                        confidence_score=float(table_dict.get("confidence_score") or 0.0),
+                        is_tabular=bool(table_dict.get("is_tabular"))
+                    )
+                )
+
+                total_tables_found += 1
+                if not table_dict.get("is_tabular"):
+                    non_tabular_sections += 1
 
         if total_tables_found == 0:
-            return JSONResponse(
-                content=convert_numpy_types({
-                    "success": False,
-                    "error": "No usable tables found in the file",
-                    "details": "The file may contain only text, images, or unstructured data",
-                    "sheets_analyzed": len(all_sheets),
-                    "tables_found": 0,
-                    "non_tabular_sections": non_tabular_sections
-                }),
-                status_code=400
-            )
+            raise HTTPException(status_code=400, detail="No usable tables found in the file")
 
-        response = {
-            "success": True,
-            "message": f"Successfully processed {total_tables_found} table(s) from {len(all_sheets)} sheet(s)",
-            "sheets_analyzed": len(all_sheets),
-            "tables_found": total_tables_found,
-            "non_tabular_sections": non_tabular_sections,
-            "tables": processed_sheets,
-            "file_info": {
-                "filename": file.filename,
-                "file_type": file_extension,
-                "sheets": list(all_sheets.keys()) if file_extension != 'csv' else []
-            }
-        }
+        file_info = FileInfo(
+            filename=file.filename,
+            file_type=ext or "unknown",
+            sheets=list(all_sheets.keys()) if ext != 'csv' else []
+        )
+
+        resp = UploadResponse(
+            success=True,
+            message=f"Successfully processed {total_tables_found} table(s) from {len(all_sheets)} sheet(s)",
+            sheets_analyzed=len(all_sheets),
+            tables_found=total_tables_found,
+            non_tabular_sections=non_tabular_sections,
+            tables=processed_tables,
+            file_info=file_info
+        )
 
         if total_tables_found == 1:
-            main_table = processed_sheets[0]
-            response.update({
-                "columns": main_table["column_names"],
-                "row_count": main_table["rows"],
-                "preview": main_table["preview"],
-                "sheet_name": main_table["sheet_name"],
-                "is_tabular": main_table["is_tabular"]
-            })
+            main_table = processed_tables[0]
+            resp.columns = main_table.column_names
+            resp.row_count = main_table.rows
+            resp.preview = main_table.preview
+            resp.sheet_name = main_table.sheet_name
+            resp.is_tabular = main_table.is_tabular
 
-        return JSONResponse(content=convert_numpy_types(response))
+        # FastAPI will auto-serialize thanks to response_model
+        return JSONResponse(content=convert_numpy_types(resp.dict()))
+
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error processing file: {e}")
-        return JSONResponse(
-            content={
-                "success": False,
-                "error": f"Processing failed: {str(e)}",
-                "details": "An unexpected error occurred while processing the file"
-            },
-            status_code=500
-        )
+        logger.exception("Unexpected error")
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -311,14 +242,10 @@ async def health_check():
 @app.get("/")
 async def root():
     return {
-        "message": "Excel/CSV Sheet Processor API",
-        "version": "1.0.0",
+        "message": settings.APP_NAME,
+        "version": settings.VERSION,
         "endpoints": {
             "upload": "/upload/ (POST)",
             "health": "/health (GET)"
         }
     }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
