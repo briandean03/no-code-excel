@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 from typing import Any, Dict, List, Optional, Tuple
 from scipy.ndimage import label
+from app.DataCleaner import DataCleaner
 import logging
 
 class TableProcessor:

@@ -24,6 +24,8 @@ class TableSectionMeta(BaseModel):
     header_row: Optional[int] = None
     confidence_score: Optional[float] = Field(None, ge=0, le=1)
     is_tabular: bool
+    cleaning_actions: Optional[List[str]] = None
+
 
 class FileInfo(BaseModel):
     filename: str
