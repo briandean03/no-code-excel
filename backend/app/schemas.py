@@ -7,6 +7,14 @@ class TableStats(BaseModel):
     non_null_counts: Dict[str, int]
     data_quality: Optional[Dict[str, Any]] = None
     memory_usage: Optional[float] = None
+class DataOverview(BaseModel):
+    tables_processed: int
+    rows_total: int
+    columns_total: int
+    missing_values_fixed: int
+    date_columns_standardized: int
+    duplicate_rows_removed: int
+    overall_completeness: float
 
 class TableSectionMeta(BaseModel):
     sheet_name: str
@@ -46,3 +54,5 @@ class UploadResponse(BaseModel):
     preview: Optional[List[Dict[str, Any]]] = None
     sheet_name: Optional[str] = None
     is_tabular: Optional[bool] = None
+    
+    overview: Optional[DataOverview] = None

@@ -43,14 +43,24 @@ const FileUploader = () => {
     setLoading(true);
     setError(null);
     setIsAnalyzed(false);
+    setOverview(null);
+    setOverviewLoading(true);
+
     try {
       const formData = new FormData();
       formData.append("file", file);
       const res = await axios.post("http://localhost:8000/upload/", formData, {
         headers: { "Content-Type": "multipart/form-data" },
       });
+
       const data = res.data;
       setResult(data);
+
+      if (data.overview) {
+        setOverview(data.overview);
+        setOverviewLoading(false);
+      }
+      
       if (data.tables && data.tables.length > 0) {
         const table = data.tables[0];
         setSelectedTableIndex(0);
@@ -59,7 +69,6 @@ const FileUploader = () => {
       } else if (data.non_tabular_sections > 0) {
         setError("No tabular data found, but non-tabular content detected. Review the data below.");
       }
-      await fetchDataOverview(file);
     } catch (err) {
       setError(err.response?.data?.error || "Upload failed. Please try again.");
     } finally {
@@ -67,21 +76,7 @@ const FileUploader = () => {
     }
   };
   
-  const fetchDataOverview = async (file) => {
-  try {
-    setOverviewLoading(true);
-    const formData = new FormData();
-    formData.append("file", file);
-    const res = await axios.post("http://localhost:8000/data-overview/", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
-    });
-    setOverview(res.data);
-  } catch (err) {
-    console.error("Error fetching data overview:", err);
-  } finally {
-    setOverviewLoading(false);
-  }
-};
+  
 
   const handleCleanAndAnalyze = () => {
     setIsAnalyzed(true);
