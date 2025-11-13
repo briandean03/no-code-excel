@@ -12,6 +12,7 @@ from app.config import settings
 from app.schemas import UploadResponse, TableSectionMeta, TableStats, FileInfo
 from app.processors.table_processor import TableProcessor
 from app.DataCleaner import DataCleaner
+from app.schemas import UploadResponse, TableSectionMeta, TableStats, FileInfo, DataOverview
 
 # ---- Logging ----
 logging.basicConfig(level=logging.INFO)
@@ -143,6 +144,15 @@ async def upload_excel(file: UploadFile = File(...)):
         processed_tables: List[TableSectionMeta] = []
         total_tables_found = 0
         non_tabular_sections = 0
+        
+        #Overview accumulators (merged from /data-overview/)
+        total_tables = 0
+        total_rows = 0
+        total_cols = 0
+        missing_values_fixed = 0
+        date_cols_standardized = 0
+        duplicate_rows_removed = 0
+        completeness_scores = []
 
         for sheet_name, df in all_sheets.items():
             df_cleaned = df.dropna(how='all').dropna(axis=1, how='all')
@@ -168,6 +178,37 @@ async def upload_excel(file: UploadFile = File(...)):
                 cleaner.remove_empty().fill_missing('mean').standardize_dates()
                 cleaned_table = cleaner.get_cleaned_df()
                 cleaning_log = cleaner.get_summary()
+                
+                 # ---- Overview metrics (using cleaned table) ----
+                total_tables += 1
+                total_rows += len(cleaned_table)
+                total_cols += len(cleaned_table.columns)
+
+                original_missing = int(table.isna().sum().sum())
+                cleaned_missing = int(cleaned_table.isna().sum().sum())
+                fixed = max(0, original_missing - cleaned_missing)
+                missing_values_fixed += fixed
+
+                # Date columns standardized (heuristic similar to /data-overview/)
+                for col in cleaned_table.columns:
+                    try:
+                        if str(cleaned_table[col].dtype).startswith('datetime64') or (
+                            cleaned_table[col].astype(str).str.match(r'^\d{4}-\d{2}-\d{2}$').sum()
+                            > len(cleaned_table) * 0.8
+                        ):
+                            date_cols_standardized += 1
+                    except Exception:
+                        continue
+
+                duplicate_rows_removed += int(table.duplicated().sum())
+
+                completeness = (
+                    cleaned_table.notna().sum().sum()
+                    / (len(cleaned_table) * len(cleaned_table.columns))
+                    * 100
+                ) if len(cleaned_table) > 0 and len(cleaned_table.columns) > 0 else 0.0
+                completeness_scores.append(completeness)
+
 
                 tinfo = processor.get_table_info(table)
                 preview = safe_json_convert(table, max_rows=10)
@@ -207,6 +248,10 @@ async def upload_excel(file: UploadFile = File(...)):
 
         if total_tables_found == 0:
             raise HTTPException(status_code=400, detail="No usable tables found in the file")
+        
+        overall_completeness = float(
+            round(np.mean(completeness_scores), 2)
+        ) if completeness_scores else 0.0
 
         file_info = FileInfo(
             filename=file.filename,
@@ -221,8 +266,18 @@ async def upload_excel(file: UploadFile = File(...)):
             tables_found=total_tables_found,
             non_tabular_sections=non_tabular_sections,
             tables=processed_tables,
-            file_info=file_info
+            file_info=file_info,
+            overview=DataOverview(
+                tables_processed=total_tables,
+                rows_total=total_rows,
+                columns_total=total_cols,
+                missing_values_fixed=missing_values_fixed,
+                date_columns_standardized=date_cols_standardized,
+                duplicate_rows_removed=duplicate_rows_removed,
+                overall_completeness=overall_completeness,
+            )
         )
+
 
         if total_tables_found == 1:
             main_table = processed_tables[0]
@@ -243,100 +298,7 @@ async def upload_excel(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
     
     
-@app.post("/data-overview/")
-async def data_overview(file: UploadFile = File(...)):
-    """
-    High-level overview endpoint that summarizes all tables in the uploaded Excel/CSV.
-    Returns aggregated cleaning and quality metrics.
-    """
-    try:
-        contents = await file.read()
-        ext = file.filename.lower().split('.')[-1] if '.' in file.filename else ''
-        all_sheets = {}
 
-        if ext in ['xlsx', 'xls']:
-            all_sheets = pd.read_excel(BytesIO(contents), sheet_name=None, header=None)
-        elif ext == 'csv':
-            csv_df = pd.read_csv(BytesIO(contents), header=None)
-            all_sheets = {'CSV': csv_df}
-        else:
-            raise HTTPException(status_code=400, detail="Unsupported file format")
-
-        total_tables = 0
-        total_rows = 0
-        total_cols = 0
-        missing_values_fixed = 0
-        date_cols_standardized = 0
-        duplicate_rows_removed = 0
-        completeness_scores = []
-
-        from app.DataCleaner import DataCleaner  # if not imported globally
-        from app.processors.table_processor import TableProcessor
-        processor = TableProcessor(logger=logger)
-
-        for sheet_name, df in all_sheets.items():
-            df = df.dropna(how='all').dropna(axis=1, how='all')
-            detected = processor.detect_tables(df)
-
-            for t in detected:
-                table = t["table"]
-                if table.empty:
-                    continue
-
-                total_tables += 1
-                total_rows += len(table)
-                total_cols += len(table.columns)
-
-                # Cleaning
-                cleaner = DataCleaner(table)
-                cleaner.remove_empty().fill_missing('mean').standardize_dates()
-                cleaned_df = cleaner.get_cleaned_df()
-                summary = cleaner.get_summary()
-
-                # Compute metrics
-                original_missing = int(table.isna().sum().sum())
-                cleaned_missing = int(cleaned_df.isna().sum().sum())
-                fixed = max(0, original_missing - cleaned_missing)
-                missing_values_fixed += fixed
-
-                # Detect standardized date columns
-                for col in cleaned_df.columns:
-                    if str(cleaned_df[col].dtype).startswith('datetime64') or (
-                        cleaned_df[col].astype(str).str.match(r'^\d{4}-\d{2}-\d{2}$').sum()
-                        > len(cleaned_df) * 0.8
-                    ):
-                        date_cols_standardized += 1
-
-                # Duplicates
-                duplicate_rows_removed += int(table.duplicated().sum())
-
-                # Completeness
-                completeness = (cleaned_df.notna().sum().sum() /
-                                (len(cleaned_df) * len(cleaned_df.columns))) * 100
-                completeness_scores.append(completeness)
-
-        if total_tables == 0:
-            raise HTTPException(status_code=400, detail="No valid tables found for overview")
-
-        overall_completeness = round(np.mean(completeness_scores), 2) if completeness_scores else 0
-
-        overview = {
-            "tables_processed": total_tables,
-            "rows_total": total_rows,
-            "columns_total": total_cols,
-            "missing_values_fixed": missing_values_fixed,
-            "date_columns_standardized": date_cols_standardized,
-            "duplicate_rows_removed": duplicate_rows_removed,
-            "overall_completeness": overall_completeness,
-        }
-
-        return JSONResponse(content=overview)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Overview processing failed")
-        raise HTTPException(status_code=500, detail=f"Data overview failed: {str(e)}")
 
 
 @app.get("/health")
