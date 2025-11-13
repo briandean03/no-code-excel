@@ -211,7 +211,9 @@ async def upload_excel(file: UploadFile = File(...)):
 
 
                 tinfo = processor.get_table_info(table)
-                preview = safe_json_convert(table, max_rows=10)
+                raw_preview = safe_json_convert(table)
+                cleaned_preview = safe_json_convert(cleaned_table)
+
 
                 stats = TableStats(
                     data_types={col: str(dtype) for col, dtype in table.dtypes.items()},
@@ -229,9 +231,10 @@ async def upload_excel(file: UploadFile = File(...)):
                         rows=int(len(table)),
                         columns=int(len(table.columns)),
                         column_names=list(table.columns),
-                        preview=preview,
+                        preview_raw=raw_preview,          
+                        preview_cleaned=cleaned_preview,
                         stats=stats,
-                        cleaning_actions=cleaning_log["changes"],  # ✅ new
+                        cleaning_actions=cleaning_log["changes"],  
                         start_row=table_dict.get("start_row"),
                         end_row=table_dict.get("end_row"),
                         start_col=table_dict.get("start_col"),
@@ -283,9 +286,13 @@ async def upload_excel(file: UploadFile = File(...)):
             main_table = processed_tables[0]
             resp.columns = main_table.column_names
             resp.row_count = main_table.rows
-            resp.preview = main_table.preview
+
+            # Use raw preview for single-table convenience
+            resp.preview = main_table.preview_raw  
+
             resp.sheet_name = main_table.sheet_name
             resp.is_tabular = main_table.is_tabular
+
 
         # FastAPI will auto-serialize thanks to response_model
         return JSONResponse(content=convert_numpy_types(resp.dict()))

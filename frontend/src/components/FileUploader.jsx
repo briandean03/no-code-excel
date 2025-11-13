@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect} from "react";
 import axios from "axios";
 import {
   Sparkles,
@@ -22,6 +22,19 @@ const FileUploader = () => {
   const [isAnalyzed, setIsAnalyzed] = useState(false);
   const [overview, setOverview] = useState(null);
   const [overviewLoading, setOverviewLoading] = useState(false);
+  const [viewMode, setViewMode] = useState("raw"); // raw | cleaned
+
+  useEffect(() => {
+  if (result) {
+    const table = result.tables[selectedTableIndex];
+    setColumns(table.column_names || []);
+    setPreviewRows(
+      viewMode === "cleaned"
+        ? table.preview_cleaned
+        : table.preview_raw
+    );
+  }
+}, [viewMode, selectedTableIndex, result]);
 
 
   const handleFileChange = (e) => {
@@ -65,7 +78,12 @@ const FileUploader = () => {
         const table = data.tables[0];
         setSelectedTableIndex(0);
         setColumns(table.column_names || []);
-        setPreviewRows(table.preview || []);
+        setPreviewRows(
+          viewMode === "cleaned"
+            ? table.preview_cleaned
+            : table.preview_raw
+        );
+
       } else if (data.non_tabular_sections > 0) {
         setError("No tabular data found, but non-tabular content detected. Review the data below.");
       }
@@ -84,18 +102,26 @@ const FileUploader = () => {
 
   const handleTableChange = (e) => {
     const index = parseInt(e.target.value);
+    setSelectedTableIndex(index);
+
     if (!result?.tables || !result.tables[index]) {
-      setSelectedTableIndex(0);
       setColumns([]);
       setPreviewRows([]);
       return;
     }
-    setSelectedTableIndex(index);
+
     const table = result.tables[index];
     setColumns(table.column_names || []);
-    setPreviewRows(table.preview || []);
+
+    setPreviewRows(
+      viewMode === "cleaned"
+        ? table.preview_cleaned
+        : table.preview_raw
+    );
+
     setCopied(false);
-  };
+};
+
 
   const handleCopy = () => {
     if (!columns.length || !previewRows.length) return;
@@ -130,13 +156,38 @@ const FileUploader = () => {
     URL.revokeObjectURL(a.href);
   };
 
+  const handleExportCleaned = () => {
+    const table = result?.tables?.[selectedTableIndex];
+    if (!table) return;
+
+    const cleanedRows = table.preview_cleaned;
+    if (!columns.length || !cleanedRows || cleanedRows.length === 0) return;
+
+    const csv = columns.join(",") + "\n" + cleanedRows.map(row =>
+      columns.map(col => {
+        const value = row[col];
+        return value === null || value === undefined || String(value).toLowerCase() === "nan"
+          ? ""
+          : JSON.stringify(value).replace(/^"|"$/g, '');
+      }).join(",")
+    ).join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${table.sheet_name || "table"}-cleaned.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+};
+
+
   const Metric = ({ label, value }) => (
-  <div className="bg-white rounded-lg border border-slate-200 p-3 flex flex-col items-center justify-center">
-    <span className="text-slate-500 text-xs">{label}</span>
-    value={`${overview?.overall_completeness?.toFixed?.(1) ?? 0}%`}
-    <span className="text-slate-800 text-base font-semibold">{value}</span>
-  </div>
+    <div className="bg-white rounded-lg border border-slate-200 p-3 flex flex-col items-center justify-center">
+      <span className="text-slate-500 text-xs">{label}</span>
+      <span className="text-slate-800 text-base font-semibold">{value}</span>
+    </div>
 );
+
 
 
   return (
@@ -296,6 +347,32 @@ const FileUploader = () => {
       </div>
     )}
 
+    {/* RAW / CLEANED TOGGLE */}
+    <div className="flex gap-3 mb-4">
+      <button
+        onClick={() => setViewMode("raw")}
+        className={`px-3 py-1 rounded-md text-sm ${
+          viewMode === "raw"
+            ? "bg-blue-500 text-white"
+            : "bg-slate-200"
+        }`}
+      >
+        Raw View
+      </button>
+
+      <button
+        onClick={() => setViewMode("cleaned")}
+        className={`px-3 py-1 rounded-md text-sm ${
+          viewMode === "cleaned"
+            ? "bg-blue-500 text-white"
+            : "bg-slate-200"
+        }`}
+      >
+        Cleaned View
+      </button>
+    </div>
+
+
     {/* 🧮 Table Content */}
     {columns.length > 0 && previewRows.length > 0 ? (
       <div className="overflow-x-auto border border-slate-200 rounded-lg">
@@ -420,12 +497,18 @@ const FileUploader = () => {
           <Download className="w-4 h-4" />
           Export CSV
         </button>
+
+        <button
+          onClick={handleExportCleaned}
+          className="btn-secondary flex items-center gap-1"
+        >
+          <Download className="w-4 h-4" />
+          Download Cleaned CSV
+      </button>
       </div>
     )}
   </div>
-)}
-
-        
+)}   
       </main>
     </div>
   );

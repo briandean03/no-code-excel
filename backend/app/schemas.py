@@ -23,7 +23,8 @@ class TableSectionMeta(BaseModel):
     rows: int
     columns: int
     column_names: List[str]
-    preview: List[Dict[str, Any]]
+    preview_raw: List[Dict[str, Any]]
+    preview_cleaned: List[Dict[str, Any]]
     stats: TableStats
     start_row: Optional[int] = None
     end_row: Optional[int] = None
